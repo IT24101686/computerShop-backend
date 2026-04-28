@@ -1,57 +1,75 @@
 import mongoose, { model } from "mongoose";
-const productSchema=new mongoose.Schema(
+const productSchema = new mongoose.Schema(
     {
-        productid:{
-            type:String,
-            required:true,
-            unique:true
+        productid: {
+            type: String,
+            required: true,
+            unique: true
         },
-        name:{
-            type:String,
-            required:true
+        name: {
+            type: String,
+            required: true
         },
-        description:{
-            type:String,
-            required:true
+        description: {
+            type: String,
+            required: true
         },
-        altnames:{
-            type:[String],
-            required:true,
-            default:[]
-        },
-
-        price:{
-            type:Number,
-            required:true
-        },
-        labelledprice:{
-            type:Number
+        altnames: {
+            type: [String],
+            required: true,
+            default: []
         },
 
-        category:{
-            type:String,
-            default:"other"
+        price: {
+            type: Number,
+            required: true
         },
-        image:{
-            type:[String],
-            required:true,
-            default:["/images/default.png","/images/default.png"]
+        labelledprice: {
+            type: Number
         },
-        isvisible:{
-            type:Boolean ,
-            default:true,
-            required:true
+
+        category: {
+            type: String,
+            default: "other"
         },
-        brand:{
-            type:String,
-            default:"Generic"
+        image: {
+            type: [String],
+            required: true,
+            default: ["/images/default.png", "/images/default.png"]
         },
-        model:{
-            type:String,
-            default:"standard"
+        isvisible: {
+            type: Boolean,
+            default: true,
+            required: true
+        },
+        brand: {
+            type: String,
+            default: "Generic"
+        },
+        warranty: {
+            type: String,
+            default: "No Warranty"
+        },
+        model: {
+            type: String,
+            default: "standard"
+        },
+        stock: {
+            type: Number,
+            default: 0,
+            required: true
+        },
+        supplier: {
+            type: String,
+            default: "Unknown"
+        },
+        isDeleted: {
+            type: Boolean,
+            default: false
         }
-    
-    }
+
+    },
+    { timestamps: true }
 )
-const Product=mongoose.model("Product",productSchema);
+const Product = mongoose.model("Product", productSchema);
 export default Product;
