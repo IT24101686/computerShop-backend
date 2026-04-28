@@ -14,32 +14,39 @@ const transporter = nodemailer.createTransport({
         pass: process.env.INVENTORY_PASS
     }
 });// 1. Supplier adds new stock (Status: Pending)
-export function addSupply(req, res) {
+export async function addSupply(req, res) {
     // Only supplier should be calling this (handled via middleware/frontend)
     const { productId, quantity, pricePerUnit, notes, warranty } = req.body;
     const supplierId = req.User.id; // From JWT token (req.User set by middleware)
 
-    const newInventory = new Inventory({
-        supplierId,
-        productId,
-        quantity,
-        pricePerUnit,
-        warranty,
-        notes,
-        status: "pending" // Default
-    });
+    try {
+        const productExists = await Product.findOne({ productid: productId });
+        if (!productExists) {
+            return res.status(404).json({ error: "Cannot add supply: Product ID does not exist in the system." });
+        }
 
-    newInventory.save()
-        .then((inventory) => {
-            return res.status(201).json({ message: "Supply request added, waiting for approval", inventory });
-        })
-        .catch((error) => {
-            return res.status(500).json({ error: "Failed to add supply request", details: error.message });
+        const newInventory = new Inventory({
+            supplierId,
+            productId,
+            quantity,
+            pricePerUnit,
+            warranty,
+            notes,
+            status: "pending" // Default
         });
+
+        const inventory = await newInventory.save();
+        res.status(201).json({ message: "Supply request added, waiting for approval", inventory });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to add supply request", details: error.message });
+    }
 }
 
 // 2. Inventory Manager gets all pending supplies
 export async function getPendingSupplies(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     try {
         const supplies = await Inventory.find({ status: "pending" }).populate("supplierId", "email firstName lastName companyName contactNumber");
         const productIds = supplies.map(s => s.productId);
@@ -58,6 +65,9 @@ export async function getPendingSupplies(req, res) {
 
 // 3. Inventory Manager gets all supplies
 export async function getAllSupplies(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     try {
         const supplies = await Inventory.find().populate("supplierId", "email firstName lastName companyName contactNumber");
         const productIds = supplies.map(s => s.productId);
@@ -76,6 +86,9 @@ export async function getAllSupplies(req, res) {
 
 // 4. Inventory Manager Approves the supply
 export async function approveSupply(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     try {
         const supplyId = req.params.id;
         const inventory = await Inventory.findById(supplyId);
@@ -87,20 +100,20 @@ export async function approveSupply(req, res) {
             return res.status(400).json({ error: "Supply is already processed" });
         }
 
+        // Check if product exists before approving
+        const updatedProduct = await Product.findOne({ productid: inventory.productId });
+        
+        if (!updatedProduct) {
+            return res.status(404).json({ error: "Product not found to update stock. Cannot approve supply." });
+        }
+
+        // Update product stock
+        updatedProduct.stock += inventory.quantity;
+        await updatedProduct.save();
+
         // Update inventory status
         inventory.status = "approved";
         await inventory.save();
-
-        // Update product stock
-        const updatedProduct = await Product.findOneAndUpdate(
-            { productid: inventory.productId },
-            { $inc: { stock: inventory.quantity } },
-            { new: true }
-        );
-
-        if (!updatedProduct) {
-            return res.status(404).json({ error: "Product not found to update stock" });
-        }
 
         // Log Stock IN
         await new StockLog({
@@ -134,6 +147,9 @@ export async function approveSupply(req, res) {
 
 // 5. Inventory Manager Rejects the supply
 export function rejectSupply(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     const supplyId = req.params.id;
 
     Inventory.findById(supplyId)
@@ -158,6 +174,9 @@ export function rejectSupply(req, res) {
 
 // 6. Send Alert to Suppliers and Admin (Manually triggered by Inventory Manager)
 export async function alertLowStock(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     try {
         const { productid } = req.body;
         const product = await Product.findOne({ productid });
@@ -170,8 +189,17 @@ export async function alertLowStock(req, res) {
         };
         const limit = thresholds[product.category] || thresholds.Other;
 
-        // Find emails of all recipients
-        const usersToAlert = await User.find({ role: { $in: ["supplier", "admin"] } });
+        // Find the specific supplier who last supplied this product
+        const lastSupply = await Inventory.findOne({ productId: product.productid, status: "approved" }).sort({ suppliedDate: -1 }).populate("supplierId");
+        const specificSupplierId = lastSupply && lastSupply.supplierId ? lastSupply.supplierId._id : null;
+
+        // Find emails of all recipients (Admins and the specific supplier)
+        const usersToAlert = await User.find({ 
+            $or: [
+                { role: "admin" },
+                ...(specificSupplierId ? [{ _id: specificSupplierId }] : [])
+            ]
+        });
         const emails = usersToAlert.map(u => u.email).filter(Boolean);
 
         if (emails.length === 0) return res.status(400).json({ message: "No recipients found" });
@@ -228,13 +256,22 @@ export async function checkAndSendLowStockAlert(productId) {
 
         // Condition: Stock is less than the specific category threshold
         if (Number(product.stock) < threshold) {
-            // Find all Admins and Product Managers
-            const managers = await User.find({ role: { $in: ["admin", "productManager"] } });
+            // Find the specific supplier who last supplied this product
+            const lastSupply = await Inventory.findOne({ productId: product.productid, status: "approved" }).sort({ suppliedDate: -1 }).populate("supplierId");
+            const specificSupplierId = lastSupply && lastSupply.supplierId ? lastSupply.supplierId._id : null;
+
+            // Find all Admins, Product Managers, and the specific supplier
+            const usersToNotify = await User.find({ 
+                $or: [
+                    { role: { $in: ["admin", "productManager"] } },
+                    ...(specificSupplierId ? [{ _id: specificSupplierId }] : [])
+                ]
+            });
             
-            for (const manager of managers) {
+            for (const user of usersToNotify) {
                 // Check if we already sent a notification for this product recently (to avoid spam)
                 const recent = await Notification.findOne({
-                    userId: manager._id,
+                    userId: user._id,
                     type: "low-stock",
                     title: { $regex: product.name },
                     createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } // within last 24h
@@ -244,23 +281,27 @@ export async function checkAndSendLowStockAlert(productId) {
 
                 // 1. Create In-App Notification
                 await new Notification({
-                    userId: manager._id,
+                    userId: user._id,
                     title: `🚨 Low Stock Alert: ${product.name}`,
                     message: `Low Stock! ${product.name} has only ${product.stock} units remaining. (Threshold: ${threshold})`,
                     type: "low-stock",
-                    link: "/inventory/low-stock"
+                    link: user.role === "supplier" ? "/supplier/dashboard" : "/inventory/low-stock"
                 }).save();
 
                 // 2. Send Email Alert
-                if (manager.email) {
+                if (user.email) {
+                    const subject = user.role === "supplier" ? 
+                        `🚨 CRITICAL: Re-stock Request - ${product.name}` : 
+                        `🚨 CRITICAL: Low Stock Alert - ${product.name}`;
+
                     const mailOptions = {
                         from: `"TechShop System" <${process.env.INVENTORY_EMAIL}>`,
-                        to: manager.email,
-                        subject: `🚨 CRITICAL: Low Stock Alert - ${product.name}`,
+                        to: user.email,
+                        subject: subject,
                         html: `
                             <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
                                 <h2 style="color: #f44336;">Low Stock Alert</h2>
-                                <p>Hello ${manager.firstName},</p>
+                                <p>Hello ${user.firstName},</p>
                                 <p>The system has detected that <strong>${product.name}</strong> is critically low on stock after a recent movement.</p>
                                 <div style="background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 10px 0;">
                                     <b>Current Stock:</b> <span style="color: red; font-weight: bold;">${product.stock} units remaining</span><br/>
@@ -268,8 +309,8 @@ export async function checkAndSendLowStockAlert(productId) {
                                     <b>Category:</b> ${product.category}<br/>
                                     <b>Threshold Set:</b> ${threshold} units
                                 </div>
-                                <p>Please take immediate action to restock this item.</p>
-                                <a href="${process.env.FRONTEND_URL}/inventory/low-stock" style="display: inline-block; padding: 10px 20px; background: #2563eb; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">Go to Inventory Portal</a>
+                                <p>${user.role === "supplier" ? "Please arrange to supply more stock as soon as possible." : "Please take immediate action to restock this item."}</p>
+                                <a href="${process.env.FRONTEND_URL}/${user.role === "supplier" ? "supplier/dashboard" : "inventory/low-stock"}" style="display: inline-block; padding: 10px 20px; background: #2563eb; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">Go to Portal</a>
                             </div>
                         `
                     };
@@ -284,6 +325,9 @@ export async function checkAndSendLowStockAlert(productId) {
 
 // 7. Get Stock Movement Ledger
 export async function getStockLedger(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     try {
         const logs = await StockLog.find().sort({ date: -1 });
         res.status(200).json(logs);
@@ -294,6 +338,9 @@ export async function getStockLedger(req, res) {
 
 // 8. Create Stock Request (Manager to Supplier) + Send Email
 export async function createStockRequest(req, res) {
+    if (!isAdmin(req) && req.User?.role !== "inventoryManager") {
+        return res.status(403).json({ message: "Access denied" });
+    }
     try {
         const { supplierId, productId, quantity, notes } = req.body;
 
@@ -365,6 +412,9 @@ export async function updateStockRequestStatus(req, res) {
 
 // Supplier: Get his own supply requests
 export function getMySupplies(req, res) {
+    if (req.User?.role !== "supplier") {
+        return res.status(403).json({ message: "Access denied. Suppliers only." });
+    }
     const supplierId = req.User.id;
     Inventory.find({ supplierId }).sort({ suppliedDate: -1 })
         .then((supplies) => {

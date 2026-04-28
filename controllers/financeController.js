@@ -9,7 +9,8 @@ export async function getIncomeSummary(req, res) {
     }
 
     try {
-        const orders = await Order.find({ status: { $in: ["Delivered", "Shipped", "Processing"] } }); // Adjust statuses as per your business logic
+        // Only count orders that have actually been paid (ignores unpaid COD)
+        const orders = await Order.find({ paymentStatus: "Paid", status: { $ne: "Cancelled" } });
 
         const totalIncome = orders.reduce((acc, order) => acc + order.totalAmount, 0);
 
@@ -54,8 +55,8 @@ export async function getProfitSummary(req, res) {
     }
 
     try {
-        // Income
-        const orders = await Order.find({ status: { $in: ["Delivered", "Shipped", "Processing"] } });
+        // Income (only paid orders)
+        const orders = await Order.find({ paymentStatus: "Paid", status: { $ne: "Cancelled" } });
         const totalIncome = orders.reduce((acc, order) => acc + order.totalAmount, 0);
 
         // Expenses

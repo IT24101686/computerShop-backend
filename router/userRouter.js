@@ -4,7 +4,7 @@ import {
     changeUserRole, updateUserProfile, forgotPassword, resetPassword, 
     registerStaffUser, getPendingStaff, approveStaffUser, getSupplierStats, 
     getDashboardOverview, toggleBlockUser, getUserInsights, 
-    getAddresses, saveAddress, deleteAddress, logoutUser, getMe
+    getAddresses, saveAddress, deleteAddress, logoutUser, getMe, verifyOTP
 } from "../controllers/userController.js";
 import authorizeUser, { optionalAuth } from "../lib/jwtMiddleware.js";
 
@@ -16,7 +16,8 @@ userRouter.post("/login", loginUser);
 userRouter.post("/logout", logoutUser);
 userRouter.get("/me", optionalAuth, getMe);
 userRouter.post("/forgot-password", forgotPassword);
-userRouter.post("/reset-password/:token", resetPassword);
+userRouter.post("/verify-otp", verifyOTP);
+userRouter.post("/reset-password", resetPassword);
 
 // ── Protected (logged in users) ──
 userRouter.put("/profile", authorizeUser, updateUserProfile); 

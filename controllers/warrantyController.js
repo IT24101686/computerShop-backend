@@ -96,7 +96,14 @@ export async function getWarrantyClaims(req, res) {
         const claims = await WarrantyClaim.find(query)
             .populate("customerId", "firstName lastName email")
             .populate("supplierId", "firstName lastName companyName")
-            .sort({ submissionDate: -1 });
+            .sort({ submissionDate: -1 })
+            .lean();
+
+        // Attach product supplier name to filter dropdown in frontend
+        for (let claim of claims) {
+            const product = await Product.findOne({ productid: claim.productId });
+            claim.productSupplierName = product ? product.supplier : "Unknown";
+        }
 
         res.status(200).json(claims);
     } catch (err) {

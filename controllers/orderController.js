@@ -72,7 +72,8 @@ export async function createOrder(req, res) {
 
         const orderId = "ORD-" + Math.floor(Math.random() * 1000000000);
 
-        // Verify stock + calculate total from DB price (prevent price tampering)
+        // Pass 1: Verify all stock and calculate total price first (prevent partial stock deduction)
+        const productsToProcess = [];
         for (let i = 0; i < items.length; i++) {
             const product = await Product.findOne({ productid: items[i].productId });
 
@@ -91,25 +92,32 @@ export async function createOrder(req, res) {
             items[i].name = product.name;
             items[i].price = product.price;
             items[i].image = product.image?.[0] || "";
+            
+            productsToProcess.push({ product, quantity: items[i].quantity, productId: items[i].productId });
+        }
 
+        // Pass 2: Deduct stock and create logs only after all verifications passed
+        for (const item of productsToProcess) {
+            const { product, quantity, productId } = item;
+            
             // Deduct stock
-            product.stock -= items[i].quantity;
+            product.stock -= quantity;
             await product.save();
 
             // Log Stock OUT
             await new StockLog({
-                productId: items[i].productId,
+                productId: productId,
                 type: "OUT",
-                quantity: items[i].quantity,
+                quantity: quantity,
                 source: `Order: ${orderId}`
             }).save();
 
             // Trigger Automatic Low Stock Alert if < 5
-            checkAndSendLowStockAlert(items[i].productId);
+            checkAndSendLowStockAlert(productId);
         }
 
         // Apply dummy promo code deduction if any
-        if (promoCode === "New10") {
+        if (promoCode && promoCode.toUpperCase() === "NEW10") {
             totalAmount = totalAmount * 0.90; // 10% discount
         }
 
@@ -173,6 +181,11 @@ export async function updateOrderStatus(req, res) {
             return res.status(404).json({ message: "Order not found" });
         }
 
+        // Prevent changing status if order is already cancelled (to avoid stock discrepancies)
+        if (order.status === "Cancelled" && status && status !== "Cancelled") {
+            return res.status(400).json({ message: "Cannot change the status of an already cancelled order." });
+        }
+
         // Auto-generate tracking number if status is 'Shipped' and not provided
         if (status === "Shipped" && !trackingNumber && !order.trackingNumber) {
             const randomID = Math.random().toString(36).substring(2, 9).toUpperCase();
@@ -189,7 +202,7 @@ export async function updateOrderStatus(req, res) {
             }
         }
 
-        // If cancelled → restore stock
+        // If cancelled → restore stock + handle payment status
         if (status === "Cancelled" && order.status !== "Cancelled") {
             for (const item of order.items) {
                 await Product.findOneAndUpdate(
@@ -205,6 +218,13 @@ export async function updateOrderStatus(req, res) {
                     source: `Cancelled: ${orderId}`
                 }).save();
             }
+
+            // Auto-update payment status on cancellation
+            if (order.paymentStatus === "Pending") {
+                order.paymentStatus = "Cancelled";
+            } else if (order.paymentStatus === "Paid") {
+                order.paymentStatus = "Refunded";
+            }
         }
 
         if (trackingNumber !== undefined) order.trackingNumber = trackingNumber;
@@ -219,7 +239,10 @@ export async function updateOrderStatus(req, res) {
         if (status && status !== previousStatus) {
             let subject = "";
             let text = "";
-            if (status === "Shipped") {
+            if (status === "Processing") {
+                subject = `⚙️ Your Order ${order.orderId} is now Processing`;
+                text = `Hello ${order.shippingAddress.firstName},\n\nWe have started processing your order ${order.orderId}. We will notify you once it has been shipped.\n\nThank you for shopping with us!`;
+            } else if (status === "Shipped") {
                 subject = `📦 Your Order ${order.orderId} has been Shipped!`;
                 text = `Hello ${order.shippingAddress.firstName},\n\nYour order ${order.orderId} has been shipped!\nCourier: ${order.courierService || 'Not specified'}\nTracking Number: ${order.trackingNumber || 'Not specified'}\n\nThank you for shopping with us!`;
             } else if (status === "Delivered") {
@@ -281,6 +304,11 @@ export async function cancelMyOrder(req, res) {
             }).save();
         }
 
+        if (order.paymentStatus === "Pending") {
+            order.paymentStatus = "Cancelled";
+        } else if (order.paymentStatus === "Paid") {
+            order.paymentStatus = "Refunded";
+        }
         order.status = "Cancelled";
         await order.save();
 
@@ -328,5 +356,46 @@ export async function getSalesStats(req, res) {
         res.status(200).json(stats);
     } catch (error) {
         res.status(500).json({ message: "Error fetching sales stats", error: error.message });
+    }
+}
+
+// PUT /orders/:orderId/confirm-delivery  - Customer: Confirm they received the order
+export async function confirmOrderDelivery(req, res) {
+    try {
+        const { orderId } = req.params;
+        const order = await Order.findOne({ orderId, userEmail: req.User.email });
+
+        if (!order) {
+            return res.status(404).json({ message: "Order not found or you do not have permission." });
+        }
+
+        if (order.status !== "Shipped") {
+            return res.status(400).json({ message: `Cannot confirm delivery. Your order is currently '${order.status}'. It must be 'Shipped' first.` });
+        }
+
+        order.status = "Delivered";
+        
+        // If it was Cash on Delivery, and they received it, mark as Paid
+        if (order.paymentMethod === "Cash on Delivery" && order.paymentStatus === "Pending") {
+            order.paymentStatus = "Paid";
+        }
+
+        await order.save();
+
+        // Optional: Send a thank you email
+        try {
+            await transporter.sendMail({
+                from: `"TechShop Support" <${process.env.EMAIL_USER}>`,
+                to: order.userEmail,
+                subject: `✅ Delivery Confirmed: ${order.orderId}`,
+                text: `Hello ${order.shippingAddress.firstName},\n\nThank you for confirming the delivery of your order ${order.orderId}. We hope you enjoy your purchase!\n\nBest Regards,\nTechShop Team`
+            });
+        } catch (emailErr) {
+            console.error("Delivery confirmation email error:", emailErr);
+        }
+
+        res.status(200).json({ message: "Delivery confirmed successfully.", order });
+    } catch (error) {
+        res.status(500).json({ message: "Error confirming delivery", error: error.message });
     }
 }

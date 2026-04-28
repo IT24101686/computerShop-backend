@@ -174,11 +174,20 @@ export function logoutUser(req, res) {
 // ── Private: Get Me (Check Session) ──
 export async function getMe(req, res) {
     try {
-        const user = await User.findById(req.User.id, "-password");
-        if (!user) return res.status(404).json({ message: "User not found" });
-        res.json(user);
+        const foundUser = await User.findById(req.User.id, "-password");
+        if (!foundUser) return res.status(404).json({ message: "User not found" });
+
+        res.json({
+            id: foundUser._id,
+            firstName: foundUser.firstName,
+            lastName: foundUser.lastName,
+            email: foundUser.email,
+            role: foundUser.role,
+            image: foundUser.image,
+            phone: foundUser.contactNumber || "",
+        });
     } catch (err) {
-        res.status(500).json({ message: "Error fetching user info", error: err.message });
+        res.status(500).json({ message: "Error fetching user", error: err.message });
     }
 }
 
@@ -237,8 +246,14 @@ export async function approveStaffUser(req, res) {
 export async function deleteUser(req, res) {
     if (!isAdmin(req)) return res.status(403).json({ message: "Admin only" });
     try {
-        const user = await User.findByIdAndDelete(req.params.id);
+        const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ message: "User not found" });
+
+        if (user.role === "admin") {
+            return res.status(403).json({ message: "Administrator accounts cannot be deleted for security reasons." });
+        }
+
+        await User.findByIdAndDelete(req.params.id);
         res.json({ message: "User deleted successfully" });
     } catch (err) {
         res.status(500).json({ message: "Error deleting user", error: err.message });
@@ -342,15 +357,14 @@ export async function toggleBlockUser(req, res) {
 // ── Private: Update Profile (logged in only) ──
 export async function updateUserProfile(req, res) {
     try {
-        const { firstName, lastName, phone } = req.body;
+        const { firstName, lastName, phone, image } = req.body;
         const userId = req.User.id; // from middleware
 
         const updateData = {};
-        if (firstName) {
-            updateData.firstName = firstName;
-        }
+        if (firstName) updateData.firstName = firstName;
         if (lastName) updateData.lastName = lastName;
         if (phone !== undefined) updateData.contactNumber = phone;
+        if (image !== undefined) updateData.image = image;
 
         const user = await User.findByIdAndUpdate(userId, updateData, { new: true });
         if (!user) return res.status(404).json({ message: "User not found" });
@@ -363,6 +377,7 @@ export async function updateUserProfile(req, res) {
                 lastName: user.lastName,
                 email: user.email,
                 role: user.role,
+                image: user.image,
                 phone: user.contactNumber || "",
             }
         });
@@ -444,89 +459,7 @@ export async function getSupplierStats(req, res) {
     }
 }
 
-// ── Public: Forgot Password ──
-export async function forgotPassword(req, res) {
-    try {
-        const { email } = req.body;
-        if (!email) return res.status(400).json({ message: "Email is required." });
 
-        const user = await User.findOne({ email });
-        if (!user) return res.status(404).json({ message: "No account found with this email." });
-
-        // Generate a secure random token
-        const resetToken = crypto.randomBytes(32).toString("hex");
-        const resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-
-        user.resetToken = resetToken;
-        user.resetTokenExpiry = resetTokenExpiry;
-        await user.save();
-
-        // Send real email with reset link
-        const resetLink = `${process.env.FRONTEND_URL || "http://localhost:5173"}/reset-password/${resetToken}`;
-
-        const mailOptions = {
-            from: `"Computer Shop Support" <${process.env.EMAIL_USER}>`,
-            to: email,
-            subject: "🔐 Password Reset Request",
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-                    <h2 style="color: #333;">Password Reset Request</h2>
-                    <p>Hello,</p>
-                    <p>You requested to reset your password. Click the button below to set a new password. This link will expire in 1 hour.</p>
-                    <div style="text-align: center; margin: 30px 0;">
-                        <a href="${resetLink}" style="background-color: #007bff; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Reset Password</a>
-                    </div>
-                    <p>If you didn't request this, you can safely ignore this email.</p>
-                    <hr />
-                    <p style="font-size: 12px; color: #777;">&copy; 2026 Computer Shop Management System</p>
-                </div>
-            `
-        };
-
-        transporter.sendMail(mailOptions, (err) => {
-            if (err) {
-                console.error("Forgot Password Email Error:", err.message);
-                return res.status(500).json({ message: "Failed to send reset email. Please try again later." });
-            }
-            res.json({ message: "Password reset link sent to your email! Please check your inbox." });
-        });
-
-    } catch (err) {
-        res.status(500).json({ message: "Failed to process reset request.", error: err.message });
-    }
-}
-
-// ── Public: Reset Password ──
-export async function resetPassword(req, res) {
-    try {
-        const { token } = req.params;
-        const { password } = req.body;
-
-        if (!password || password.length < 6) {
-            return res.status(400).json({ message: "Password must be at least 6 characters." });
-        }
-
-        const user = await User.findOne({
-            resetToken: token,
-            resetTokenExpiry: { $gt: new Date() }, // Token must not be expired
-        });
-
-        if (!user) {
-            return res.status(400).json({ message: "Invalid or expired reset link. Please request a new one." });
-        }
-
-        // Update password and clear token
-        user.password = bcrypt.hashSync(password, 10);
-        user.resetToken = null;
-        user.resetTokenExpiry = null;
-        await user.save();
-
-        res.json({ message: "Password reset successfully! Please log in with your new password." });
-
-    } catch (err) {
-        res.status(500).json({ message: "Password reset failed.", error: err.message });
-    }
-}
 
 // Admin: Get Dashboard Overview (Total counts & Pending items)
 export async function getDashboardOverview(req, res) {
@@ -625,6 +558,92 @@ export async function getUserInsights(req, res) {
     }
 }
 
+// ── Public: Forgot Password (Send OTP) ──
+export async function forgotPassword(req, res) {
+    const { email } = req.body;
+    try {
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ message: "User with this email does not exist" });
+
+        // Generate 4-digit OTP
+        const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        
+        // Save OTP and Expiry
+        user.resetToken = otp; 
+        user.resetTokenExpiry = Date.now() + 10 * 60 * 1000; // 10 mins
+        await user.save();
+
+        const mailOptions = {
+            from: `"TechShop Support" <${process.env.EMAIL_USER}>`,
+            to: email,
+            subject: "Password Reset OTP - TechShop",
+            html: `
+                <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+                    <div style="background-color: #0f172a; padding: 30px; text-align: center;">
+                        <h1 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 800;">TechShop</h1>
+                    </div>
+                    <div style="padding: 40px; text-align: center;">
+                        <h2 style="color: #1e293b; margin-bottom: 10px;">Reset Your Password</h2>
+                        <p style="color: #64748b; font-size: 14px; margin-bottom: 30px;">Use the 4-digit code below to reset your password. This code is valid for 10 minutes.</p>
+                        <div style="background-color: #f1f5f9; padding: 20px; border-radius: 12px; font-size: 32px; font-weight: 800; color: #3b82f6; letter-spacing: 10px; display: inline-block;">
+                            ${otp}
+                        </div>
+                        <p style="color: #94a3b8; font-size: 12px; margin-top: 30px;">If you didn't request this, you can safely ignore this email.</p>
+                    </div>
+                </div>
+            `
+        };
+
+        await transporter.sendMail(mailOptions);
+        res.status(200).json({ message: "4-digit OTP sent to your email" });
+    } catch (err) {
+        console.error("Forgot Password Error:", err);
+        res.status(500).json({ message: "Error sending OTP", error: err.message });
+    }
+}
+
+// ── Public: Verify OTP ──
+export async function verifyOTP(req, res) {
+    const { email, otp } = req.body;
+    try {
+        const user = await User.findOne({ 
+            email, 
+            resetToken: otp,
+            resetTokenExpiry: { $gt: Date.now() }
+        });
+
+        if (!user) return res.status(400).json({ message: "Invalid or expired OTP" });
+
+        res.status(200).json({ message: "OTP verified successfully" });
+    } catch (err) {
+        res.status(500).json({ message: "Error verifying OTP", error: err.message });
+    }
+}
+
+// ── Public: Reset Password ──
+export async function resetPassword(req, res) {
+    const { email, otp, newPassword } = req.body;
+    try {
+        const user = await User.findOne({ 
+            email, 
+            resetToken: otp,
+            resetTokenExpiry: { $gt: Date.now() }
+        });
+
+        if (!user) return res.status(400).json({ message: "Invalid or expired OTP" });
+
+        // Update password
+        user.password = bcrypt.hashSync(newPassword, 10);
+        user.resetToken = null;
+        user.resetTokenExpiry = null;
+        await user.save();
+
+        res.status(200).json({ message: "Password reset successfully! You can now login." });
+    } catch (err) {
+        res.status(500).json({ message: "Error resetting password", error: err.message });
+    }
+}
+
 // ── Helper: Check if user is Admin ──
 export function isAdmin(req) {
     return req.User && req.User.role === "admin";
@@ -635,7 +654,15 @@ export function isProductManager(req) {
     return req.User && req.User.role === "productManager";
 }
 
+export function isInventoryManager(req) {
+    return req.User && req.User.role === "inventoryManager";
+}
+
 // ── Helper: Check if user has Admin or Product Manager access ──
 export function hasAdminOrManagerAccess(req) {
     return req.User && (req.User.role === "admin" || req.User.role === "productManager");
+}
+
+export function hasInventoryAccess(req) {
+    return req.User && (req.User.role === "admin" || req.User.role === "inventoryManager");
 }
