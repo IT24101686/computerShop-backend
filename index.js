@@ -5,8 +5,8 @@ import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import dns from 'node:dns';
 
-// Set DNS servers for MongoDB connection stability
-dns.setServers(["1.1.1.1", "8.8.8.8"]);
+
+ dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 // Routers
 import userRouter from './router/userRouter.js';

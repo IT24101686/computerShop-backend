@@ -329,8 +329,21 @@ export async function getStockLedger(req, res) {
         return res.status(403).json({ message: "Access denied" });
     }
     try {
-        const logs = await StockLog.find().sort({ date: -1 });
-        res.status(200).json(logs);
+        const logs = await StockLog.find().sort({ date: -1 }).lean();
+        
+        const productIds = logs.map(log => log.productId);
+        const products = await Product.find({ productid: { $in: productIds } }).select("productid name category").lean();
+        
+        const detailedLogs = logs.map(log => {
+            const product = products.find(p => p.productid === log.productId);
+            return {
+                ...log,
+                productName: product ? product.name : "Unknown",
+                productCategory: product ? product.category : "Unknown"
+            };
+        });
+
+        res.status(200).json(detailedLogs);
     } catch (error) {
         res.status(500).json({ message: "Error fetching ledger", error: error.message });
     }
